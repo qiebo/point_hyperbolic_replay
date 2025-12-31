@@ -26,7 +26,7 @@ def init_args():
                         help="The list of gpuid, ex:--gpuid 3 1. Negative value means cpu-only", required=False)
     parser.add_argument('--run_seed', type=int, default=2023)
     parser.add_argument('--num_task', type=int, default=20)
-    parser.add_argument('--categories', type=int,
+    parser.add_argument('--categories', type=str,
                         default=['chair', 'sofa', 'airplane', 'bookshelf', 'bed', 'vase', 'monitor', 'table', 'toilet',
                                  'bottle', 'mantel', 'tv_stand', 'plant', 'piano', 'car', 'desk', 'dresser',
                                  'night_stand', 'glass_box', 'guitar', 'range_hood', 'bench', 'cone', 'tent',
@@ -172,11 +172,10 @@ if __name__ == '__main__':
         # original_dataset.classes is like {'airplane': 0, 'bathtub': 1, ...}
         
         # Create mapping: global_id -> incremental_id
-        # The incremental order is defined by args.categories
-        # We need to map ALL categories seen so far (up to this task)
+        # The incremental order is defined by categories seen so far
         # val_now_categories contains all categories so far
         label_mapping = {}
-        for incremental_id, cat_name in enumerate(args.categories):
+        for incremental_id, cat_name in enumerate(val_now_categories):
             if cat_name in original_dataset.classes:
                 global_id = original_dataset.classes[cat_name]
                 label_mapping[global_id] = incremental_id

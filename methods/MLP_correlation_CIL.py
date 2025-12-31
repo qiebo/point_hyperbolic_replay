@@ -398,6 +398,7 @@ class MLP_correlation(pl.LightningModule):
             cur_points_hook = self.model.feature_layer3[0].register_forward_hook(get_cur_points)
 
         best_Acc = 0
+        best_ori_acc = 0
 
         for e in range(30):
             tot_loss = 0
@@ -552,16 +553,7 @@ class MLP_correlation(pl.LightningModule):
                     # lamda = 10
                     # loss += gfk.fit(ref_features.detach(), cur_features) * lamda  # grassmann方式
 
-                    # 任务增量------------------------------------------------------------------------------------------------
-                    old_y_hat_alter = torch.zeros(old_y_hat.shape[0], 2).to("cuda")
-                    for k in range(old_y.shape[0]):
-                        now = old_y[k] // 2
-                        old_y_hat_alter[k] = old_y_hat[k, now * 2: now * 2 + 2]
-                        old_y[k] = old_y[k] - now * 2
-                    replay_loss = self.criterion(old_y_hat_alter, old_y)  # 计算旧模型预测的loss
-                    old_y_hat_alter.cpu()
-
-                    # replay_loss = self.criterion(old_y_hat, old_y)  # 计算旧模型预测的loss
+                    replay_loss = self.criterion(old_y_hat, old_y)  # 计算旧模型预测的loss
 
                     loss += replay_loss
 
@@ -1103,7 +1095,12 @@ class MLP_correlation(pl.LightningModule):
         return np.mean(distances)
 
     # 创建一个 Wasserstein 距离计算的函数
-    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01):
+    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01, max_points=256):
+        if cloud1.shape[2] > max_points:
+            idx = torch.randperm(cloud1.shape[2], device=cloud1.device)[:max_points]
+            cloud1 = cloud1[:, :, idx]
+            cloud2 = cloud2[:, :, idx]
+
         cloud1 = cloud1.permute(0, 2, 1)
         cloud2 = cloud2.permute(0, 2, 1)
 
