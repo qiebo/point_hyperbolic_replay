@@ -1,0 +1,14 @@
+Logging to ./CIL_logs/log_2025-12-28_15-08-03.txt
+Applying label mapping for Task 0. Mapping size: 40
+模型创建成功，当前输出层为2
+任务0,类别为：['chair', 'sofa']
+====================== Task 0 =======================
+<=== epoch: 0    loss: 0.7469226432089903    acc: 0.985    time: 91.54662704467773    best_acc: 0 ===>
+Update Memory: Start. Buffer Used: 0. c_local norm: 0.0000, d_local: 0.0000
+Update Memory: End. Buffer Used: 500. Stats updated.
+Ori_Acc: 0.985
+task : 0  Acc : 0.985
+Applying label mapping for Task 1. Mapping size: 40
+模型输出层改变成功，当前输出层为4
+任务1,类别为：['airplane', 'bookshelf']
+====================== Task 1 =======================

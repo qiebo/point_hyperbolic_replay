@@ -1,0 +1,10 @@
+Logging to ./CIL_logs/log_2025-12-28_14-48-07.txt
+Applying label mapping for Task 0. Mapping size: 40
+模型创建成功，当前输出层为2
+任务0,类别为：['chair', 'sofa']
+====================== Task 0 =======================
+<=== epoch: 0    loss: 0.7592616865069283    acc: 0.985    time: 142.898864030838    best_acc: 0 ===>
+<=== epoch: 1    loss: 0.5862210481142511    acc: 0.99    time: 66.51311326026917    best_acc: 0.985 ===>
+<=== epoch: 2    loss: 0.5609641628986111    acc: 0.99    time: 65.52259588241577    best_acc: 0.99 ===>
+<=== epoch: 3    loss: 0.5630714984952795    acc: 0.985    time: 65.53811573982239    best_acc: 0.99 ===>
+<=== epoch: 4    loss: 0.5538161031293626    acc: 0.985    time: 72.18902087211609    best_acc: 0.99 ===>
