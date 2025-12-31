@@ -1095,7 +1095,12 @@ class MLP_correlation(pl.LightningModule):
         return np.mean(distances)
 
     # 创建一个 Wasserstein 距离计算的函数
-    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01):
+    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01, max_points=256):
+        if cloud1.shape[2] > max_points:
+            idx = torch.randperm(cloud1.shape[2], device=cloud1.device)[:max_points]
+            cloud1 = cloud1[:, :, idx]
+            cloud2 = cloud2[:, :, idx]
+
         cloud1 = cloud1.permute(0, 2, 1)
         cloud2 = cloud2.permute(0, 2, 1)
 
