@@ -398,6 +398,10 @@ class MLP_correlation(pl.LightningModule):
             cur_points_hook = self.model.feature_layer3[0].register_forward_hook(get_cur_points)
 
         best_Acc = 0
+        best_ori_acc = 0
+        epochs_no_improve = 0
+        min_epochs = getattr(self.args, "min_epochs", 5)
+        patience = getattr(self.args, "early_stop_patience", 5)
 
         for e in range(30):
             tot_loss = 0
@@ -552,16 +556,7 @@ class MLP_correlation(pl.LightningModule):
                     # lamda = 10
                     # loss += gfk.fit(ref_features.detach(), cur_features) * lamda  # grassmann方式
 
-                    # 任务增量------------------------------------------------------------------------------------------------
-                    old_y_hat_alter = torch.zeros(old_y_hat.shape[0], 2).to("cuda")
-                    for k in range(old_y.shape[0]):
-                        now = old_y[k] // 2
-                        old_y_hat_alter[k] = old_y_hat[k, now * 2: now * 2 + 2]
-                        old_y[k] = old_y[k] - now * 2
-                    replay_loss = self.criterion(old_y_hat_alter, old_y)  # 计算旧模型预测的loss
-                    old_y_hat_alter.cpu()
-
-                    # replay_loss = self.criterion(old_y_hat, old_y)  # 计算旧模型预测的loss
+                    replay_loss = self.criterion(old_y_hat, old_y)  # 计算旧模型预测的loss
 
                     loss += replay_loss
 
@@ -595,6 +590,12 @@ class MLP_correlation(pl.LightningModule):
                 torch.save(self.model.state_dict(), r'checkpoint/pointcloud/PointBest.pkl')
                 best_Acc = Acc
                 best_ori_acc = Acc_original
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if (e + 1) >= min_epochs and epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {e} (no improvement for {patience} epochs).")
+                    break
         # Model fusion
         # print(f'Acc: {self.validation(val_loader)}')
         # if ref_model is not None:
@@ -901,153 +902,105 @@ class MLP_correlation(pl.LightningModule):
     #             self.data_seen += 1
     #     cur_hook.remove()
 
-    # Algorithm 1: Hyperbolic Manifold Expansion Elimination
     def update_memory(self, dataset_loader):
-        # Configuration for Algorithm 1
-        alpha1 = 1.0  # Weight for local deviation
-        alpha2 = 1.0  # Weight for global deviation
-        c = 0.01      # Curvature (should match training)
-        
         self.model.eval()
-        
-        # Feature storage
-        local_features = []
-        global_features = []
-        
-        def hook_local(module, input, output):
-            local_features.append(output.detach())
-            
-        def hook_global(module, input, output):
-            global_features.append(output.detach())
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        # Register hooks
-        # Local: shared_layer[2] (after first ReLU, 512 dim)
-        # Global: shared_layer (output of sequential, 256 dim)
-        handle_local = self.model.shared_layer[2].register_forward_hook(hook_local)
-        handle_global = self.model.shared_layer.register_forward_hook(hook_global)
+        feat_cache = []
+        data_batches = []
+        label_batches = []
+        feat_batches = []
 
-        # Helper to extract features for a batch of points
-        def extract_features(x_input):
-            local_features.clear()
-            global_features.clear()
+        def hook_feature(module, input, output):
+            feat_cache.append(output.detach())
+
+        handle = self.model.shared_layer.register_forward_hook(hook_feature)
+
+        def collect_batch(x_batch, y_batch):
             with torch.no_grad():
-                self.model(x_input)
-            return local_features[0], global_features[0]
+                self.model(x_batch)
+            feats = feat_cache.pop().detach().cpu()
+            data_batches.append(x_batch.cpu())
+            label_batches.append(y_batch.cpu())
+            feat_batches.append(feats)
 
-        # 1. Pre-compute Buffer stats if buffer has data
-        buffer_local_vecs = []
-        buffer_global_vecs = []
-        
+        total_seen = 0
         if self.mem_used > 0:
-            # Create batches for memory to avoid OOM
             mem_loader = DataLoader(
-                torch.utils.data.TensorDataset(self.mem_data[:self.mem_used], self.mem_label[:self.mem_used]),
-                batch_size=32, shuffle=False
+                torch.utils.data.TensorDataset(
+                    self.mem_data[:self.mem_used].cpu(),
+                    self.mem_label[:self.mem_used].cpu(),
+                ),
+                batch_size=32,
+                shuffle=False,
             )
-            for bx, by in mem_loader:
-                bx = bx.cuda()
-                l_feat, g_feat = extract_features(torch.reshape(bx, shape=(-1, 2048, 3)))
-                # Map to Tangent Space at origin
-                l_vec = logmap0(F.normalize(l_feat, dim=1), c=c)
-                g_vec = logmap0(F.normalize(g_feat, dim=1), c=c)
-                buffer_local_vecs.append(l_vec)
-                buffer_global_vecs.append(g_vec)
-            
-            # Concatenate
-            if buffer_local_vecs:
-                V_local_M = torch.cat(buffer_local_vecs)
-                V_global_M = torch.cat(buffer_global_vecs)
-            else:
-                 V_local_M = torch.empty(0, 512).cuda()
-                 V_global_M = torch.empty(0, 256).cuda()
+            for x_batch, y_batch in mem_loader:
+                collect_batch(x_batch.to(device), y_batch.long().to(device))
+
+        for batch in tqdm(dataset_loader, desc="Updating Memory (Herding)"):
+            x_batch = batch[0].to(device)
+            y_batch = batch[1].squeeze(-1).long().to(device)
+            collect_batch(x_batch, y_batch)
+            total_seen += x_batch.shape[0]
+
+        handle.remove()
+
+        if not data_batches:
+            self.mem_used = 0
+            return
+
+        all_data = torch.cat(data_batches, dim=0)
+        all_labels = torch.cat(label_batches, dim=0)
+        all_features = torch.cat(feat_batches, dim=0)
+
+        classes = torch.unique(all_labels).tolist()
+        if not classes:
+            self.mem_used = 0
+            return
+
+        per_class = self.episodic_mem_size // len(classes)
+        remainder = self.episodic_mem_size % len(classes)
+        class_budget = {c: per_class for c in classes}
+        for c in classes[:remainder]:
+            class_budget[c] += 1
+
+        mem_data = []
+        mem_label = []
+
+        for c in classes:
+            idx = (all_labels == c).nonzero(as_tuple=True)[0]
+            if idx.numel() == 0:
+                continue
+            feats_c = all_features[idx]
+            data_c = all_data[idx]
+            mean = feats_c.mean(dim=0, keepdim=True)
+            dists = torch.norm(feats_c - mean, dim=1)
+            k = min(class_budget[c], dists.numel())
+            if k == 0:
+                continue
+            k_center = k // 2
+            k_border = k - k_center
+            keep_indices = []
+            if k_center > 0:
+                center_idx = torch.topk(dists, k=k_center, largest=False).indices
+                keep_indices.append(center_idx)
+            if k_border > 0:
+                border_idx = torch.topk(dists, k=k_border, largest=True).indices
+                keep_indices.append(border_idx)
+            keep = torch.cat(keep_indices, dim=0)
+            mem_data.append(data_c[keep])
+            mem_label.append(all_labels[idx][keep])
+
+        if mem_data:
+            mem_data = torch.cat(mem_data, dim=0).to(device)
+            mem_label = torch.cat(mem_label, dim=0).to(device)
+            self.mem_used = mem_data.shape[0]
+            self.mem_data[:self.mem_used] = mem_data
+            self.mem_label[:self.mem_used] = mem_label
         else:
-            V_local_M = torch.empty(0, 512).cuda()
-            V_global_M = torch.empty(0, 256).cuda()
+            self.mem_used = 0
 
-        # Helper to compute Centroid and Radius (Average Distance)
-        def compute_stats(vectors):
-            if vectors.shape[0] == 0:
-                return torch.zeros(vectors.shape[1]).cuda(), 0.0
-            centroid = vectors.mean(dim=0)
-            # Radius = Average Euclidean distance in Tangent Space
-            dists = torch.norm(vectors - centroid, dim=1)
-            radius = dists.mean().item()
-            return centroid, radius
-
-        # Initial stats
-        c_local, d_local = compute_stats(V_local_M)
-        c_global, d_global = compute_stats(V_global_M)
-
-        print(f"Update Memory: Start. Buffer Used: {self.mem_used}. c_local norm: {c_local.norm().item():.4f}, d_local: {d_local:.4f}")
-
-        # 2. Iterate new data
-        for batch in tqdm(dataset_loader, desc="Updating Memory (Algo 1)"):
-            x_batch = batch[0]
-            y_batch = batch[1].squeeze(-1)
-            
-            # Extract features for batch
-            l_feats, g_feats = extract_features(x_batch.cuda())
-            
-            # Map batch to tangent space
-            l_vecs = logmap0(F.normalize(l_feats, dim=1), c=c)
-            g_vecs = logmap0(F.normalize(g_feats, dim=1), c=c)
-
-            for i in range(x_batch.shape[0]):
-                x, y = x_batch[i], y_batch[i]
-                v_local_x = l_vecs[i]
-                v_global_x = g_vecs[i]
-
-                # Case 1: Buffer not full
-                if self.mem_used < self.episodic_mem_size:
-                    self.mem_data[self.mem_used] = x
-                    self.mem_label[self.mem_used] = y
-                    
-                    # Update Vectors
-                    V_local_M = torch.cat([V_local_M, v_local_x.unsqueeze(0)])
-                    V_global_M = torch.cat([V_global_M, v_global_x.unsqueeze(0)])
-                    
-                    self.mem_used += 1
-                    # Recompute stats every step? (Expensive) -> Maybe periodic or incremental?
-                    # For strict Algo 1, we should update. For speed, we update stats every N steps or just let it drift slightly.
-                    # Here we do naive update for correctness as per user request.
-                    c_local, d_local = compute_stats(V_local_M)
-                    c_global, d_global = compute_stats(V_global_M)
-                    
-                else:
-                    # Case 2: Buffer full, check expansion
-                    dist_local = torch.norm(v_local_x - c_local)
-                    dist_global = torch.norm(v_global_x - c_global)
-                    
-                    delta = alpha1 * (dist_local - d_local) + alpha2 * (dist_global - d_global)
-                    
-                    idx_to_replace = -1
-                    
-                    if delta > 0:
-                        # Significant expansion: Random replace
-                        idx_to_replace = np.random.randint(0, self.episodic_mem_size)
-                    else:
-                        # Reservoir sampling chance
-                        r = np.random.randint(0, self.data_seen + 1) # data_seen is total steam count
-                        if r < self.episodic_mem_size:
-                            idx_to_replace = r
-                    
-                    if idx_to_replace != -1:
-                        self.mem_data[idx_to_replace] = x
-                        self.mem_label[idx_to_replace] = y
-                        
-                        # Update Vectors
-                        V_local_M[idx_to_replace] = v_local_x
-                        V_global_M[idx_to_replace] = v_global_x
-                        
-                        # Recompute stats
-                        c_local, d_local = compute_stats(V_local_M)
-                        c_global, d_global = compute_stats(V_global_M)
-
-                self.data_seen += 1
-
-        handle_local.remove()
-        handle_global.remove()
-        print(f"Update Memory: End. Buffer Used: {self.mem_used}. Stats updated.")
+        self.data_seen += total_seen
 
     def update_reservior(self, current_image, current_label):
         """
@@ -1103,7 +1056,12 @@ class MLP_correlation(pl.LightningModule):
         return np.mean(distances)
 
     # 创建一个 Wasserstein 距离计算的函数
-    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01):
+    def compute_wasserstein_distance_torch(self, cloud1, cloud2, p=2, blur=0.01, max_points=256):
+        if cloud1.shape[2] > max_points:
+            idx = torch.randperm(cloud1.shape[2], device=cloud1.device)[:max_points]
+            cloud1 = cloud1[:, :, idx]
+            cloud2 = cloud2[:, :, idx]
+
         cloud1 = cloud1.permute(0, 2, 1)
         cloud2 = cloud2.permute(0, 2, 1)
 
