@@ -46,7 +46,10 @@ def init_args():
     parser.add_argument('--val_batch_size', type=int, default=64)
     parser.add_argument('--eps_mem_batch', type=int, default=16)
     parser.add_argument('--min_epochs', type=int, default=5)
-    parser.add_argument('--early_stop_patience', type=int, default=5)
+    parser.add_argument('--early_stop_patience', type=int, default=0)
+    parser.add_argument('--distill_w_start', type=float, default=0.1)
+    parser.add_argument('--distill_w_end', type=float, default=1.0)
+    parser.add_argument('--distill_w_ramp_epochs', type=int, default=10)
 
     args = parser.parse_args([])
     return args

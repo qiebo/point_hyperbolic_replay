@@ -401,9 +401,14 @@ class MLP_correlation(pl.LightningModule):
         best_ori_acc = 0
         epochs_no_improve = 0
         min_epochs = getattr(self.args, "min_epochs", 5)
-        patience = getattr(self.args, "early_stop_patience", 5)
+        patience = getattr(self.args, "early_stop_patience", 0)
+        distill_w_start = getattr(self.args, "distill_w_start", 0.1)
+        distill_w_end = getattr(self.args, "distill_w_end", 1.0)
+        distill_w_ramp = max(1, getattr(self.args, "distill_w_ramp_epochs", 10))
 
         for e in range(30):
+            ramp = min(1.0, (e + 1) / distill_w_ramp)
+            distill_weight = distill_w_start + (distill_w_end - distill_w_start) * ramp
             tot_loss = 0
             tot_size = 0
             end = time.time()
@@ -522,7 +527,7 @@ class MLP_correlation(pl.LightningModule):
 
                     ref_model = ref_model.to(device)
                     mm_loss = self.similarity(ref_model)  # 计算余弦相似度？
-                    loss += mm_loss
+                    loss += distill_weight * mm_loss
                     # fusing feature manifold in replay
                     er_mem_indices = np.random.choice(self.mem_used, min(self.mem_used, self.eps_mem_batch),
                                                       replace=False)  # 生成一个以eps_mem_batch（默认为16）大小的一维数组，其中数值为0-mem_used的随机数
@@ -548,10 +553,10 @@ class MLP_correlation(pl.LightningModule):
 
                     # w距离蒸馏
                     w_loss = self.compute_wasserstein_distance_torch(cur_points, ref_points).mean()
-                    loss += w_loss
+                    loss += distill_weight * w_loss
 
                     feature_loss = self.feature_matching_loss(cur_features, ref_features)  # 原始的蒸馏方式  16*256
-                    loss += feature_loss
+                    loss += distill_weight * feature_loss
 
                     # lamda = 10
                     # loss += gfk.fit(ref_features.detach(), cur_features) * lamda  # grassmann方式
@@ -593,7 +598,7 @@ class MLP_correlation(pl.LightningModule):
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                if (e + 1) >= min_epochs and epochs_no_improve >= patience:
+                if patience > 0 and (e + 1) >= min_epochs and epochs_no_improve >= patience:
                     print(f"Early stopping at epoch {e} (no improvement for {patience} epochs).")
                     break
         # Model fusion
@@ -903,20 +908,27 @@ class MLP_correlation(pl.LightningModule):
     #     cur_hook.remove()
 
     def update_memory(self, dataset_loader):
+        alpha1 = 1.0
+        alpha2 = 1.0
+        c = 0.01
+
         self.model.eval()
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        feat_cache = []
-        data_batches = []
-        label_batches = []
-        feat_batches = []
+        local_features = []
+        global_features = []
 
-        def hook_feature(module, input, output):
-            feat_cache.append(output.detach())
+        def hook_local(module, input, output):
+            local_features.append(output.detach())
 
-        handle = self.model.shared_layer.register_forward_hook(hook_feature)
+        def hook_global(module, input, output):
+            global_features.append(output.detach())
 
-        def collect_batch(x_batch, y_batch):
+        handle_local = self.model.shared_layer[2].register_forward_hook(hook_local)
+        handle_global = self.model.shared_layer.register_forward_hook(hook_global)
+
+        def extract_features(x_input):
+            local_features.clear()
+            global_features.clear()
             with torch.no_grad():
                 self.model(x_batch)
             feats = feat_cache.pop().detach().cpu()
@@ -924,83 +936,90 @@ class MLP_correlation(pl.LightningModule):
             label_batches.append(y_batch.cpu())
             feat_batches.append(feats)
 
-        total_seen = 0
+        buffer_local_vecs = []
+        buffer_global_vecs = []
+
         if self.mem_used > 0:
             mem_loader = DataLoader(
-                torch.utils.data.TensorDataset(
-                    self.mem_data[:self.mem_used].cpu(),
-                    self.mem_label[:self.mem_used].cpu(),
-                ),
+                torch.utils.data.TensorDataset(self.mem_data[:self.mem_used], self.mem_label[:self.mem_used]),
                 batch_size=32,
                 shuffle=False,
             )
-            for x_batch, y_batch in mem_loader:
-                collect_batch(x_batch.to(device), y_batch.long().to(device))
+            for bx, _ in mem_loader:
+                bx = bx.cuda()
+                l_feat, g_feat = extract_features(torch.reshape(bx, shape=(-1, 2048, 3)))
+                l_vec = logmap0(F.normalize(l_feat, dim=1), c=c)
+                g_vec = logmap0(F.normalize(g_feat, dim=1), c=c)
+                buffer_local_vecs.append(l_vec)
+                buffer_global_vecs.append(g_vec)
 
-        for batch in tqdm(dataset_loader, desc="Updating Memory (Herding)"):
-            x_batch = batch[0].to(device)
-            y_batch = batch[1].squeeze(-1).long().to(device)
-            collect_batch(x_batch, y_batch)
-            total_seen += x_batch.shape[0]
-
-        handle.remove()
-
-        if not data_batches:
-            self.mem_used = 0
-            return
-
-        all_data = torch.cat(data_batches, dim=0)
-        all_labels = torch.cat(label_batches, dim=0)
-        all_features = torch.cat(feat_batches, dim=0)
-
-        classes = torch.unique(all_labels).tolist()
-        if not classes:
-            self.mem_used = 0
-            return
-
-        per_class = self.episodic_mem_size // len(classes)
-        remainder = self.episodic_mem_size % len(classes)
-        class_budget = {c: per_class for c in classes}
-        for c in classes[:remainder]:
-            class_budget[c] += 1
-
-        mem_data = []
-        mem_label = []
-
-        for c in classes:
-            idx = (all_labels == c).nonzero(as_tuple=True)[0]
-            if idx.numel() == 0:
-                continue
-            feats_c = all_features[idx]
-            data_c = all_data[idx]
-            mean = feats_c.mean(dim=0, keepdim=True)
-            dists = torch.norm(feats_c - mean, dim=1)
-            k = min(class_budget[c], dists.numel())
-            if k == 0:
-                continue
-            k_center = k // 2
-            k_border = k - k_center
-            keep_indices = []
-            if k_center > 0:
-                center_idx = torch.topk(dists, k=k_center, largest=False).indices
-                keep_indices.append(center_idx)
-            if k_border > 0:
-                border_idx = torch.topk(dists, k=k_border, largest=True).indices
-                keep_indices.append(border_idx)
-            keep = torch.cat(keep_indices, dim=0)
-            mem_data.append(data_c[keep])
-            mem_label.append(all_labels[idx][keep])
-
-        if mem_data:
-            mem_data = torch.cat(mem_data, dim=0).to(device)
-            mem_label = torch.cat(mem_label, dim=0).to(device)
-            self.mem_used = mem_data.shape[0]
-            self.mem_data[:self.mem_used] = mem_data
-            self.mem_label[:self.mem_used] = mem_label
+            if buffer_local_vecs:
+                V_local_M = torch.cat(buffer_local_vecs)
+                V_global_M = torch.cat(buffer_global_vecs)
+            else:
+                V_local_M = torch.empty(0, 512).cuda()
+                V_global_M = torch.empty(0, 256).cuda()
         else:
-            self.mem_used = 0
+            V_local_M = torch.empty(0, 512).cuda()
+            V_global_M = torch.empty(0, 256).cuda()
 
-        self.data_seen += total_seen
+        def compute_stats(vectors):
+            if vectors.shape[0] == 0:
+                return torch.zeros(vectors.shape[1]).cuda(), 0.0
+            centroid = vectors.mean(dim=0)
+            dists = torch.norm(vectors - centroid, dim=1)
+            radius = dists.mean().item()
+            return centroid, radius
+
+        c_local, d_local = compute_stats(V_local_M)
+        c_global, d_global = compute_stats(V_global_M)
+
+        for batch in tqdm(dataset_loader, desc="Updating Memory (Algo 1)"):
+            x_batch = batch[0]
+            y_batch = batch[1].squeeze(-1)
+
+            l_feats, g_feats = extract_features(x_batch.cuda())
+            l_vecs = logmap0(F.normalize(l_feats, dim=1), c=c)
+            g_vecs = logmap0(F.normalize(g_feats, dim=1), c=c)
+
+            for i in range(x_batch.shape[0]):
+                x, y = x_batch[i], y_batch[i]
+                v_local_x = l_vecs[i]
+                v_global_x = g_vecs[i]
+
+                if self.mem_used < self.episodic_mem_size:
+                    self.mem_data[self.mem_used] = x
+                    self.mem_label[self.mem_used] = y
+                    V_local_M = torch.cat([V_local_M, v_local_x.unsqueeze(0)])
+                    V_global_M = torch.cat([V_global_M, v_global_x.unsqueeze(0)])
+                    self.mem_used += 1
+                    c_local, d_local = compute_stats(V_local_M)
+                    c_global, d_global = compute_stats(V_global_M)
+                else:
+                    dist_local = torch.norm(v_local_x - c_local)
+                    dist_global = torch.norm(v_global_x - c_global)
+                    delta = alpha1 * (dist_local - d_local) + alpha2 * (dist_global - d_global)
+
+                    idx_to_replace = -1
+                    if delta > 0:
+                        idx_to_replace = np.random.randint(0, self.episodic_mem_size)
+                    else:
+                        r = np.random.randint(0, self.data_seen + 1)
+                        if r < self.episodic_mem_size:
+                            idx_to_replace = r
+
+                    if idx_to_replace != -1:
+                        self.mem_data[idx_to_replace] = x
+                        self.mem_label[idx_to_replace] = y
+                        V_local_M[idx_to_replace] = v_local_x
+                        V_global_M[idx_to_replace] = v_global_x
+                        c_local, d_local = compute_stats(V_local_M)
+                        c_global, d_global = compute_stats(V_global_M)
+
+                self.data_seen += 1
+
+        handle_local.remove()
+        handle_global.remove()
 
     def update_reservior(self, current_image, current_label):
         """
