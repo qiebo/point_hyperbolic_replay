@@ -908,6 +908,7 @@ class MLP_correlation(pl.LightningModule):
     #     cur_hook.remove()
 
     def update_memory(self, dataset_loader):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         alpha1 = 1.0
         alpha2 = 1.0
         c = 0.01
@@ -957,15 +958,15 @@ class MLP_correlation(pl.LightningModule):
                 V_local_M = torch.cat(buffer_local_vecs)
                 V_global_M = torch.cat(buffer_global_vecs)
             else:
-                V_local_M = torch.empty(0, 512).cuda()
-                V_global_M = torch.empty(0, 256).cuda()
+                V_local_M = torch.empty(0, 512).to(device)
+                V_global_M = torch.empty(0, 256).to(device)
         else:
-            V_local_M = torch.empty(0, 512).cuda()
-            V_global_M = torch.empty(0, 256).cuda()
+            V_local_M = torch.empty(0, 512).to(device)
+            V_global_M = torch.empty(0, 256).to(device)
 
         def compute_stats(vectors):
             if vectors.shape[0] == 0:
-                return torch.zeros(vectors.shape[1]).cuda(), 0.0
+                return torch.zeros(vectors.shape[1]).to(device), 0.0
             centroid = vectors.mean(dim=0)
             dists = torch.norm(vectors - centroid, dim=1)
             radius = dists.mean().item()
