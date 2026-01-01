@@ -913,6 +913,7 @@ class MLP_correlation(pl.LightningModule):
         alpha2 = 1.0
         c = 0.01
 
+        self.model = self.model.to(device)
         self.model.eval()
 
         local_features = []
@@ -976,10 +977,10 @@ class MLP_correlation(pl.LightningModule):
         c_global, d_global = compute_stats(V_global_M)
 
         for batch in tqdm(dataset_loader, desc="Updating Memory (Algo 1)"):
-            x_batch = batch[0]
+            x_batch = batch[0].to(device)
             y_batch = batch[1].squeeze(-1)
 
-            l_feats, g_feats = extract_features(x_batch.to(device))
+            l_feats, g_feats = extract_features(x_batch)
             l_vecs = logmap0(F.normalize(l_feats, dim=1), c=c)
             g_vecs = logmap0(F.normalize(g_feats, dim=1), c=c)
 
