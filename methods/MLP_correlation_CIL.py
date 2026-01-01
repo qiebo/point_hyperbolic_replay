@@ -399,6 +399,9 @@ class MLP_correlation(pl.LightningModule):
 
         best_Acc = 0
         best_ori_acc = 0
+        epochs_no_improve = 0
+        min_epochs = getattr(self.args, "min_epochs", 5)
+        patience = getattr(self.args, "early_stop_patience", 5)
 
         for e in range(30):
             tot_loss = 0
@@ -587,6 +590,12 @@ class MLP_correlation(pl.LightningModule):
                 torch.save(self.model.state_dict(), r'checkpoint/pointcloud/PointBest.pkl')
                 best_Acc = Acc
                 best_ori_acc = Acc_original
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if (e + 1) >= min_epochs and epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {e} (no improvement for {patience} epochs).")
+                    break
         # Model fusion
         # print(f'Acc: {self.validation(val_loader)}')
         # if ref_model is not None:
@@ -897,25 +906,41 @@ class MLP_correlation(pl.LightningModule):
         self.model.eval()
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        feat_batches = []
+        feat_cache = []
         data_batches = []
         label_batches = []
+        feat_batches = []
 
         def hook_feature(module, input, output):
-            feat_batches.append(output.detach())
+            feat_cache.append(output.detach())
 
         handle = self.model.shared_layer.register_forward_hook(hook_feature)
 
+        def collect_batch(x_batch, y_batch):
+            with torch.no_grad():
+                self.model(x_batch)
+            feats = feat_cache.pop().detach().cpu()
+            data_batches.append(x_batch.cpu())
+            label_batches.append(y_batch.cpu())
+            feat_batches.append(feats)
+
         total_seen = 0
+        if self.mem_used > 0:
+            mem_loader = DataLoader(
+                torch.utils.data.TensorDataset(
+                    self.mem_data[:self.mem_used].cpu(),
+                    self.mem_label[:self.mem_used].cpu(),
+                ),
+                batch_size=32,
+                shuffle=False,
+            )
+            for x_batch, y_batch in mem_loader:
+                collect_batch(x_batch.to(device), y_batch.long().to(device))
+
         for batch in tqdm(dataset_loader, desc="Updating Memory (Herding)"):
             x_batch = batch[0].to(device)
             y_batch = batch[1].squeeze(-1).long().to(device)
-            with torch.no_grad():
-                self.model(x_batch)
-            feats = feat_batches.pop().detach().cpu()
-            feat_batches.append(feats)
-            data_batches.append(x_batch.cpu())
-            label_batches.append(y_batch.cpu())
+            collect_batch(x_batch, y_batch)
             total_seen += x_batch.shape[0]
 
         handle.remove()

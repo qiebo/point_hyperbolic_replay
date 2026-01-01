@@ -45,6 +45,8 @@ def init_args():
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--val_batch_size', type=int, default=64)
     parser.add_argument('--eps_mem_batch', type=int, default=16)
+    parser.add_argument('--min_epochs', type=int, default=5)
+    parser.add_argument('--early_stop_patience', type=int, default=5)
 
     args = parser.parse_args([])
     return args
