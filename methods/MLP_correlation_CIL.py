@@ -976,7 +976,18 @@ class MLP_correlation(pl.LightningModule):
             mean = feats_c.mean(dim=0, keepdim=True)
             dists = torch.norm(feats_c - mean, dim=1)
             k = min(class_budget[c], dists.numel())
-            keep = torch.topk(dists, k=k, largest=False).indices
+            if k == 0:
+                continue
+            k_center = k // 2
+            k_border = k - k_center
+            keep_indices = []
+            if k_center > 0:
+                center_idx = torch.topk(dists, k=k_center, largest=False).indices
+                keep_indices.append(center_idx)
+            if k_border > 0:
+                border_idx = torch.topk(dists, k=k_border, largest=True).indices
+                keep_indices.append(border_idx)
+            keep = torch.cat(keep_indices, dim=0)
             mem_data.append(data_c[keep])
             mem_label.append(all_labels[idx][keep])
 
