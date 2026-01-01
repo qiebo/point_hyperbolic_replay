@@ -612,7 +612,9 @@ class MLP_correlation(pl.LightningModule):
         #     for name, p in self.model.named_parameters():
         #         p.data = 0.2 * param_dict[name].data + 0.8 * p.data
 
-        self.model.load_state_dict(torch.load(r'checkpoint/pointcloud/PointBest.pkl'))  # 选取准确率最好的模型作为当前模型
+        self.model.load_state_dict(
+            torch.load(r'checkpoint/pointcloud/PointBest.pkl', weights_only=True)
+        )  # 选取准确率最好的模型作为当前模型
         self.update_memory(train_loader)
         # self.calc_diameter()
         hyper_hook1.remove()
@@ -978,7 +980,7 @@ class MLP_correlation(pl.LightningModule):
 
         for batch in tqdm(dataset_loader, desc="Updating Memory (Algo 1)"):
             x_batch = batch[0].to(device)
-            y_batch = batch[1].squeeze(-1)
+            y_batch = batch[1].squeeze(-1).to(device)
 
             l_feats, g_feats = extract_features(x_batch)
             l_vecs = logmap0(F.normalize(l_feats, dim=1), c=c)
