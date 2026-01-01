@@ -946,7 +946,7 @@ class MLP_correlation(pl.LightningModule):
                 shuffle=False,
             )
             for bx, _ in mem_loader:
-                bx = bx.cuda()
+                bx = bx.to(device)
                 l_feat, g_feat = extract_features(torch.reshape(bx, shape=(-1, 2048, 3)))
                 l_vec = logmap0(F.normalize(l_feat, dim=1), c=c)
                 g_vec = logmap0(F.normalize(g_feat, dim=1), c=c)
@@ -978,7 +978,7 @@ class MLP_correlation(pl.LightningModule):
             x_batch = batch[0]
             y_batch = batch[1].squeeze(-1)
 
-            l_feats, g_feats = extract_features(x_batch.cuda())
+            l_feats, g_feats = extract_features(x_batch.to(device))
             l_vecs = logmap0(F.normalize(l_feats, dim=1), c=c)
             g_vecs = logmap0(F.normalize(g_feats, dim=1), c=c)
 
