@@ -907,7 +907,6 @@ class MLP_correlation(pl.LightningModule):
     #             self.data_seen += 1
     #     cur_hook.remove()
 
-    # Algorithm 1: Hyperbolic Manifold Expansion Elimination
     def update_memory(self, dataset_loader):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         alpha1 = 1.0
@@ -932,8 +931,11 @@ class MLP_correlation(pl.LightningModule):
             local_features.clear()
             global_features.clear()
             with torch.no_grad():
-                self.model(x_input)
-            return local_features[0], global_features[0]
+                self.model(x_batch)
+            feats = feat_cache.pop().detach().cpu()
+            data_batches.append(x_batch.cpu())
+            label_batches.append(y_batch.cpu())
+            feat_batches.append(feats)
 
         buffer_local_vecs = []
         buffer_global_vecs = []
